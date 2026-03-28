@@ -1,0 +1,129 @@
+name: Create pihire QA Infrastructure
+
+on:
+  workflow_dispatch:
+
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    outputs:
+      lb_dns: ${{ steps.get_dns.outputs.lb_dns }}
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v2
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        role-to-assume: arn:aws:iam::211125439608:role/github-oidc-role
+        role-session-name: github-oidc-session
+        aws-region: ap-south-1
+        
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v1
+
+    - name: Initialize Terraform
+      run: |
+          cd ECS
+          terraform init
+
+    - name: Validate Terraform Code
+      run: |
+          cd ECS
+          terraform validate
+    - name: Refresh the statefile
+      run: |
+          cd ECS
+          terraform refresh
+
+    - name: Plan Terraform Changes
+      run: |
+          cd ECS
+          terraform plan -out=tfplan
+
+    - name: Apply Terraform Changes
+      run: |
+          cd ECS        
+          terraform apply -auto-approve tfplan
+
+    - name: Get ALB DNS
+      id: get_dns
+      run: |
+          cd ECS
+          # Capture Terraform output, remove debug/log noise, take only the first valid hostname
+          lb_dns=$(terraform -chdir=. output -raw load_balancer_dns_name 2>/dev/null \
+            | grep -Eo '([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}' \
+            | head -n 1)
+          
+          # Write to GitHub Actions output format
+          echo "lb_dns=${lb_dns}" >> "$GITHUB_OUTPUT"
+        
+  update_route53_entries:
+    needs: terraform
+    runs-on: ubuntu-latest
+    steps: 
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        role-to-assume: arn:aws:iam::430107809132:role/Github-OICD-role
+        role-session-name: github-oidc-session
+        aws-region: ap-south-1
+    - name: Print ALB DNS from previous job
+      run: echo "The ALB DNS is ${{ needs.terraform.outputs.lb_dns }}"
+    - name: Map the load balancer DNS to route53 domains
+      run: |
+            aws route53 change-resource-record-sets \
+            --hosted-zone-id Z2APPOMPT8OP30 \
+            --change-batch '{
+            "Comment": "Add or update CNAME record",
+            "Changes": [{
+                "Action": "UPSERT",
+                "ResourceRecordSet": {
+                    "Name": "qapihireapp1o.paraminfo.online",
+                    "Type": "CNAME",
+                    "TTL": 300,
+                    "ResourceRecords": [{ "Value": "${{ needs.terraform.outputs.lb_dns }}"  }]
+                    }
+                }]
+            }'  
+
+            aws route53 change-resource-record-sets \
+            --hosted-zone-id Z2APPOMPT8OP30 \
+            --change-batch '{
+            "Comment": "Add or update CNAME record",
+            "Changes": [{
+                "Action": "UPSERT",
+                "ResourceRecordSet": {
+                    "Name": "qapihireapi1o.paraminfo.online",
+                    "Type": "CNAME",
+                    "TTL": 300,
+                    "ResourceRecords": [{ "Value": "${{ needs.terraform.outputs.lb_dns }}"  }]
+                    }
+                }]
+            }'  
+
+            aws route53 change-resource-record-sets \
+            --hosted-zone-id Z2APPOMPT8OP30 \
+            --change-batch '{
+            "Comment": "Add or update CNAME record",
+            "Changes": [{
+                "Action": "UPSERT",
+                "ResourceRecordSet": {
+                    "Name": "qapihirecp1o.paraminfo.online",
+                    "Type": "CNAME",
+                    "TTL": 300,
+                    "ResourceRecords": [{ "Value": "${{ needs.terraform.outputs.lb_dns }}"  }]
+                    }
+                }]
+            }' 
+          
+    
+
+
+          
